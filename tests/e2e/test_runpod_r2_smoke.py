@@ -1,7 +1,7 @@
 """RunPod Serverless and Cloudflare R2 smoke test.
 
-Set RUN_E2E=1 and configure the required environment variables before running
-this test. It submits a real job and can incur RunPod usage charges.
+Configure the required environment variables before running this test. It
+submits a real job and can incur RunPod usage charges.
 """
 
 from __future__ import annotations
@@ -10,9 +10,13 @@ import copy
 import json
 import os
 from pathlib import Path
+import time
 
 import pytest
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -22,14 +26,12 @@ RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 E2E_IMAGE_URL = os.getenv("E2E_IMAGE_URL")
 E2E_VIDEO_URL = os.getenv("E2E_VIDEO_URL")
-E2E_TIMEOUT_SECONDS = int(os.getenv("E2E_TIMEOUT_SECONDS", "1800"))
+E2E_TIMEOUT_SECONDS = int(os.getenv("E2E_TIMEOUT_SECONDS", "300"))
+E2E_POLL_INTERVAL_SECONDS = float(os.getenv("E2E_POLL_INTERVAL_SECONDS", "5"))
 E2E_WORKFLOW_PATH = os.getenv("E2E_WORKFLOW_PATH")
 
 
 def _skip_unless_e2e_is_configured():
-    if os.getenv("RUN_E2E") != "1":
-        pytest.skip("Set RUN_E2E=1 to submit a live RunPod job.")
-
     required = {
         "RUNPOD_API_KEY": RUNPOD_API_KEY,
         "RUNPOD_ENDPOINT_ID": RUNPOD_ENDPOINT_ID,
@@ -94,19 +96,57 @@ def _set_test_media_urls(workflow: dict) -> dict:
     return configured_workflow
 
 
+def _wait_for_runpod_job(job: dict, headers: dict) -> dict:
+    """Poll a queued/running RunPod job until it finishes or times out."""
+    status = job.get("status")
+    if status in {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}:
+        return job
+
+    job_id = job.get("id")
+    if not isinstance(job_id, str) or not job_id:
+        pytest.fail(f"RunPod response has no job ID to poll: {job}")
+
+    status_url = (
+        f"{RUNPOD_API_BASE.rstrip('/')}/{RUNPOD_ENDPOINT_ID}/status/{job_id}"
+    )
+    deadline = time.monotonic() + E2E_TIMEOUT_SECONDS
+    while status not in {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pytest.fail(
+                f"RunPod job {job_id} did not finish within "
+                f"{E2E_TIMEOUT_SECONDS} seconds; last response: {job}"
+            )
+        time.sleep(min(E2E_POLL_INTERVAL_SECONDS, remaining))
+        try:
+            response = requests.get(
+                status_url,
+                headers=headers,
+                timeout=min(30, max(1, remaining)),
+            )
+            response.raise_for_status()
+            job = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            pytest.fail(f"Could not poll RunPod job {job_id}: {exc}")
+        status = job.get("status")
+
+    return job
+
+
 def test_runpod_workflow_uploads_public_r2_outputs():
     """Submit the real workflow and verify every returned public R2 URL."""
     _skip_unless_e2e_is_configured()
     workflow = _set_test_media_urls(_load_workflow())
-    endpoint_url = f"{RUNPOD_API_BASE.rstrip('/')}/{RUNPOD_ENDPOINT_ID}/runsync"
+    endpoint_url = f"{RUNPOD_API_BASE.rstrip('/')}/{RUNPOD_ENDPOINT_ID}/run"
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
     try:
         response = requests.post(
             endpoint_url,
-            headers={
-                "Authorization": f"Bearer {RUNPOD_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json={"input": {"workflow": workflow}},
             timeout=E2E_TIMEOUT_SECONDS,
         )
@@ -115,6 +155,7 @@ def test_runpod_workflow_uploads_public_r2_outputs():
     except (requests.RequestException, ValueError) as exc:
         pytest.fail(f"RunPod E2E request failed: {exc}")
 
+    job = _wait_for_runpod_job(job, headers)
     assert job.get("status") == "COMPLETED", job
     output = job.get("output")
     assert isinstance(output, dict), job
