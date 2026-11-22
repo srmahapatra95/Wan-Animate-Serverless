@@ -141,10 +141,9 @@ python -m pip install -r requirements-test.txt
 pytest tests/unit tests/integration -v
 ```
 
-The live end-to-end test is opt-in and submits a real RunPod job:
+The live end-to-end test submits a real RunPod job:
 
 ```bash
-RUN_E2E=1 \
 RUNPOD_API_KEY=<api-key> \
 RUNPOD_ENDPOINT_ID=<endpoint-id> \
 E2E_IMAGE_URL=https://<public-image-url> \
@@ -162,7 +161,7 @@ pytest tests/e2e -v
 | R2 upload failure | Configure all five required R2 variables and verify the R2 API token has object-write permission. |
 | Input URL validation failure | Use a direct HTTPS URL on port 443 that does not resolve to private, localhost, or reserved addresses. |
 | Workflow completes with no outputs | Confirm the workflow has a supported video or audio output node such as `SaveVideo`. |
-| E2E test is skipped | Set `RUN_E2E=1` and provide the required RunPod credentials and public input URLs. |
+| E2E test is skipped | Provide the required RunPod credentials and public input URLs. |
 
 ## Security
 

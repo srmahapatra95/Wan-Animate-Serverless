@@ -46,4 +46,4 @@ COPY start.sh .
 RUN chmod +x /app/start.sh
 
 # Set the default command to run when starting the container
-CMD ["/app/start.sh"]
+ENTRYPOINT ["/app/start.sh"]

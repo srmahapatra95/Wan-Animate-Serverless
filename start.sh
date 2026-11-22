@@ -1,6 +1,5 @@
 #!/bin/bash
 set -Eeuo pipefail
-trap 'status=$?; echo "ERROR: start.sh failed at line ${LINENO} (exit code ${status})." >&2' ERR
 
 # RunPod mounts the network volume at /runpod-volume; expose it at /workspace.
 if [[ ! -d /runpod-volume ]]; then
@@ -8,23 +7,26 @@ if [[ ! -d /runpod-volume ]]; then
     exit 1
 fi
 
-if [[ -e /workspace && ! -L /workspace ]]; then
-    echo "ERROR: /workspace exists and is not a symlink; refusing to remove it." >&2
-    exit 1
+if [[ -L /workspace ]]; then
+    if [[ "$(readlink -f /workspace)" != "$(readlink -f /runpod-volume)" ]]; then
+        echo "ERROR: /workspace is already a symlink to a different location." >&2
+        exit 1
+    fi
+elif [[ -e /workspace ]]; then
+    if [[ ! -d /workspace ]] || ! rmdir /workspace 2>/dev/null; then
+        echo "ERROR: /workspace exists and is not an empty directory; refusing to replace it." >&2
+        exit 1
+    fi
+    ln -s /runpod-volume /workspace
+else
+    ln -s /runpod-volume /workspace
 fi
 
-ln -sfn /runpod-volume /workspace
 
-HANDLER_PYTHON="${HANDLER_PYTHON:-/opt/handler-venv/bin/python}"
-if [[ ! -x "${HANDLER_PYTHON}" ]]; then
-    echo "ERROR: Handler Python is not executable: ${HANDLER_PYTHON}" >&2
-    exit 1
-fi
-
-COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
-COMFY_PYTHON="${COMFY_PYTHON:-${COMFY_DIR}/.venv/bin/python}"
-COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
-COMFYUI_PORT="${COMFYUI_PORT:-8188}"
+export COMFY_DIR=/workspace/ComfyUI
+export COMFY_PYTHON="${COMFY_DIR}/.venv/bin/python"
+export COMFYUI_HOST=127.0.0.1
+export COMFYUI_PORT=8188
 
 if [[ ! -d "${COMFY_DIR}" ]]; then
     echo "ERROR: ComfyUI directory not found: ${COMFY_DIR}" >&2
@@ -45,16 +47,10 @@ export COMFY_OUTPUT_DIR="${COMFY_DIR}/output"
 mkdir -p "${COMFY_INPUT_DIR}" "${COMFY_OUTPUT_DIR}"
 
 COMFY_PID_FILE="/tmp/comfyui.pid"
-HANDLER_PID=""
 
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
-
-    if [[ -n "${HANDLER_PID}" ]] && kill -0 "${HANDLER_PID}" 2>/dev/null; then
-        kill -TERM "${HANDLER_PID}" 2>/dev/null || true
-        wait "${HANDLER_PID}" 2>/dev/null || true
-    fi
 
     if [[ -n "${COMFYUI_PID:-}" ]] && kill -0 "${COMFYUI_PID}" 2>/dev/null; then
         kill -TERM "${COMFYUI_PID}" 2>/dev/null || true
@@ -69,10 +65,14 @@ trap cleanup EXIT INT TERM
 cd "${COMFY_DIR}"
 
 # Do not use "source" here: this is an executable, not a shell script.
-"${COMFY_PYTHON}" main.py \
+(
+    exec "${COMFY_PYTHON}" main.py \
     --listen "${COMFYUI_HOST}" \
-    --port "${COMFYUI_PORT}" &
+    --port "${COMFYUI_PORT}"
+ ) &
 COMFYUI_PID=$!
+
+
 echo "${COMFYUI_PID}" > "${COMFY_PID_FILE}"
 
 echo "Started ComfyUI (PID ${COMFYUI_PID})"
@@ -106,13 +106,4 @@ fi
 cd /app
 echo "Starting RunPod handler..."
 
-"${HANDLER_PYTHON}" /app/handler.py &
-HANDLER_PID=$!
-
-set +e
-wait "${HANDLER_PID}"
-HANDLER_STATUS=$?
-set -e
-
-HANDLER_PID=""
-exit "${HANDLER_STATUS}"
+exec /opt/handler-venv/bin/python -u handler.py
